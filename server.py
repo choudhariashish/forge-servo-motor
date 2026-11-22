@@ -76,6 +76,7 @@ PAGE = """<!DOCTYPE html>
   .tabbar { display:flex; gap:8px; margin-bottom:18px; }
   .tabbtn { padding:9px 24px; border-radius:8px; }
   .tabbtn.active { background:var(--acc); color:#041019; }
+  .homeBtn { background:var(--warn); color:#241500; }
   .pane { display:none; }
   .pane.active { display:flex; flex-wrap:wrap; gap:20px;
                  justify-content:center; }
@@ -83,7 +84,7 @@ PAGE = """<!DOCTYPE html>
   #none { color:var(--dim); padding:40px; background:var(--card);
           border-radius:14px; text-align:center; line-height:1.8; }
   #none b { color:var(--fg); font-size:16px; display:block; }
-  #code { width:100%; height:240px; background:#0b0e13; color:#cfe3ff;
+  #code { width:100%; height:52vh; min-height:300px; background:#0b0e13; color:#cfe3ff;
           font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
           border:1px solid #2c3644; border-radius:8px; padding:12px;
           resize:vertical; tab-size:4; white-space:pre; }
@@ -133,6 +134,8 @@ PAGE = """<!DOCTYPE html>
     <span>actual <b class="actPos">-</b></span>
     <span><b class="volts">-</b> V</span>
     <span><b class="temp">-</b>&deg;C</span>
+    <span>spd <b class="actSpd">-</b></span>
+    <span>err <b class="spdErr">-</b></span>
     <span class="moving">idle</span>
   </div>
   <div class="row">
@@ -150,6 +153,14 @@ PAGE = """<!DOCTYPE html>
   </div>
   <div class="row">
     <button class="tq on">Torque: ON</button>
+    <button class="homeBtn" title="move to position 0">&#8962; Home</button>
+  </div>
+  <div class="row">
+    <button class="modeBtn">Servo</button>
+    <button class="dirBtn" title="wheel direction">FWD</button>
+    <input type="range" class="spd" min="0" max="3000" value="0">
+    <input type="number" class="spdNum" min="-32767" max="32767" value="0">
+    <button class="stopBtn">Stop</button>
   </div>
   <div class="row presets">
     <button data-p="0">0&deg;</button>
@@ -164,16 +175,20 @@ PAGE = """<!DOCTYPE html>
 <script>
 const DEFAULT_CODE = `# available helpers:
 #   move(id, pos, time_ms)   pos(id)      volts(id)   temp(id)
-#   speed(id)                torque(id, on)          wheel(id, speed)
-#   servo_mode(id)           sleep(s)     running()   ids()
-#   print(...)               time (module)
-for _ in range(3):
-    for sid in ids():
-        move(sid, 2048, 800)
-    sleep(1.0)
-    for sid in ids():
-        move(sid, 1024, 800)
-    sleep(1.0)
+#   get_speed(id)            torque(id, on)          load(id)
+#   wheel_mode(id, speed) -> continuous rotation (-32767..32767, <0 = REV)
+#   servo_mode(id)    -> back to position mode
+#   sleep(s)  running()  ids()  print(...)  time
+for count in range(0, 5):
+    for id in ids():
+        move(id, 1024, 100)
+        sleep(0.01)
+    sleep(1)
+
+    for id in ids():
+        move(id, 2048, 100)
+        sleep(0.01)
+    sleep(1)
 print("done:", [pos(s) for s in ids()])
 `;
 
@@ -248,8 +263,51 @@ function makeTile(id) {
     } catch (e) { connBad(e); }
   };
 
+  // ---- wheel (constant-speed, closed-loop in firmware) ----
+  const t = {el, q, setTarget, dir: 1};
+  const sendWheel = v =>
+    api('/api/wheel', {id, speed: v}).catch(connBad);
+  const inWheel = () => q('modeBtn').classList.contains('on');
+  const setSpd = (v, fire) => {
+    const a = Math.max(0, Math.min(3000, Math.abs(v) | 0));
+    q('spd').value = a;
+    q('spdNum').value = t.dir * a;
+    if (fire && inWheel()) sendWheel(t.dir * a);
+  };
+  t.setSpd = setSpd;
+
+  q('modeBtn').onclick = async () => {
+    const wheel = !inWheel();
+    try {
+      await api('/api/mode', {id, wheel});
+      q('modeBtn').classList.toggle('on', wheel);
+      q('modeBtn').textContent = wheel ? 'Wheel' : 'Servo';
+      if (wheel && t.dir * Math.abs(+q('spd').value))
+        sendWheel(t.dir * Math.abs(+q('spd').value));
+    } catch (e) { connBad(e); }
+  };
+  q('dirBtn').onclick = () => {
+    t.dir = -t.dir;
+    q('dirBtn').textContent = t.dir > 0 ? 'FWD' : 'REV';
+    setSpd(+q('spd').value, true);
+  };
+  q('spd').oninput = e => setSpd(+e.target.value, true);
+  q('spdNum').onchange = e => {
+    t.dir = (+e.target.value) < 0 ? -1 : 1;
+    q('dirBtn').textContent = t.dir > 0 ? 'FWD' : 'REV';
+    setSpd(+e.target.value, true);
+  };
+  q('stopBtn').onclick = () => { setSpd(0, false); sendWheel(0); };
+
+  q('homeBtn').onclick = async () => {
+    try {
+      await api('/api/home', {id});
+      setSpd(0, false);
+    } catch (e) { connBad(e); }
+  };
+
   document.getElementById('paneTiles').appendChild(el);
-  tiles[id] = {el, q, setTarget};
+  tiles[id] = t;
 }
 
 function updateTile(id, s) {
@@ -263,6 +321,17 @@ function updateTile(id, s) {
   t.q('moving').textContent = s.moving ? 'moving' : 'idle';
   t.q('tq').classList.toggle('on', s.torque);
   t.q('tq').textContent = 'Torque: ' + (s.torque ? 'ON' : 'OFF');
+  const wheel = s.mode === 1;
+  t.q('modeBtn').classList.toggle('on', wheel);
+  t.q('modeBtn').textContent = wheel ? 'Wheel' : 'Servo';
+  t.q('actSpd').textContent = wheel ? s.speed : '-';
+  t.q('spdErr').textContent = wheel ? (s.wheel_target - s.speed) : '-';
+  if (wheel && s.wheel_target !== 0) {
+    t.dir = s.wheel_target < 0 ? -1 : 1;
+    t.q('dirBtn').textContent = t.dir > 0 ? 'FWD' : 'REV';
+  }
+  if (document.activeElement !== t.q('spdNum'))
+    t.setSpd(s.wheel_target, false);
   // keep UI synced to hardware unless user is editing the number box
   if (document.activeElement !== t.q('posNum'))
     t.setTarget(s.pos, false);
@@ -341,6 +410,7 @@ class State:
     script_stop = threading.Event()
     script_running = False
     script_output = []
+    targets = {}         # id -> last commanded wheel speed
 
 
 class ScriptStopped(Exception):
@@ -378,11 +448,11 @@ def script_env():
         "pos": lambda sid: call("get_position", sid),
         "volts": lambda sid: call("get_voltage", sid),
         "temp": lambda sid: call("get_temp", sid),
-        "speed": lambda sid: call("get_speed", sid),
+        "get_speed": lambda sid: call("get_speed", sid),
         "load": lambda sid: call("get_load", sid),
         "current": lambda sid: call("get_current", sid),
         "torque": lambda sid, on: call("torque", sid, bool(on)),
-        "wheel": lambda sid, v: call("wheel", sid, v),
+        "wheel_mode": lambda sid, v: call("wheel_mode", sid, v),
         "servo_mode": lambda sid: call("servo_mode", sid),
         "status": lambda sid: call("status", sid),
         "ids": lambda: sorted(k for k, v in State.servos.items()
@@ -503,6 +573,7 @@ class Handler(BaseHTTPRequestHandler):
                             info["torque"] = bool(p[0]) if p else None
                         except (ServoError, serial.SerialException, OSError):
                             info["online"] = False
+                    info["wheel_target"] = State.targets.get(sid, 0)
                     out.append(info)
             self._json(200, {
                 "servos": out,
@@ -553,6 +624,40 @@ class Handler(BaseHTTPRequestHandler):
                         State.servos[1] = {"online": False, "misses": 99}
                         State.servos[new_id] = {"online": True, "misses": 0}
                 self._json(200, {"ok": ok, "id": new_id if ok else sid})
+
+            elif self.path == "/api/wheel":
+                v = int(d["speed"])
+                if not -32767 <= v <= 32767:
+                    raise ValueError("speed -32767..32767")
+                with State.lock:
+                    if State.bus is None:
+                        raise ServoError("serial port disconnected")
+                    if v == 0:
+                        State.bus.stop(sid)
+                    else:
+                        State.bus.wheel_mode(sid, v)
+                    State.targets[sid] = v
+                self._json(200, {"ok": True})
+
+            elif self.path == "/api/mode":
+                wheel = bool(d["wheel"])
+                with State.lock:
+                    if State.bus is None:
+                        raise ServoError("serial port disconnected")
+                    State.bus.set_mode(sid, wheel=wheel)
+                    if not wheel:
+                        State.targets[sid] = 0
+                self._json(200, {"ok": True})
+
+            elif self.path == "/api/home":
+                with State.lock:
+                    if State.bus is None:
+                        raise ServoError("serial port disconnected")
+                    State.bus.stop(sid)          # halt wheel spin
+                    State.bus.servo_mode(sid)    # back to position mode
+                    State.bus.move(sid, 0, time_ms=1000)
+                    State.targets[sid] = 0
+                self._json(200, {"ok": True})
 
             elif self.path == "/api/script/run":
                 run_script(str(d["code"]))

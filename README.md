@@ -55,9 +55,9 @@ Available helpers:
 |---|---|
 | `move(id, pos, time_ms)` | goal position 0–4095 |
 | `pos(id)` `volts(id)` `temp(id)` | read position / voltage / temp |
-| `speed(id)` `load(id)` `current(id)` | speed, load, mA feedback |
+| `get_speed(id)` `load(id)` `current(id)` | measured speed, load, mA |
 | `torque(id, on)` | holding torque on/off |
-| `wheel(id, speed)` | constant-speed mode (−32767..32767) |
+| `wheel_mode(id, speed)` | continuous-rotation mode (−32767..32767, <0 = rev) |
 | `servo_mode(id)` | back to position mode |
 | `status(id)` | all feedback as a dict |
 | `ids()` | list of online servo IDs |

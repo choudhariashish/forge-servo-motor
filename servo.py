@@ -162,6 +162,9 @@ class BusServo:
         """Write bytes at addr. reg=True = buffered, executes on action()."""
         self._transact(sid, REG_WRITE if reg else WRITE,
                        (addr, *data), expect_reply=False)
+        # servo drops packets that arrive while it is still processing a
+        # write — pace consecutive packets; longer for flash-backed regs
+        time.sleep(0.02 if addr < 40 else 0.005)
 
     def action(self, sid=BROADCAST_ID):
         self._transact(sid, ACTION, expect_reply=False)
@@ -201,9 +204,15 @@ class BusServo:
         self.write(sid, REG_GOAL_POS,
                    (*le16(position), *le16(int(time_ms)), *le16(int(speed))))
 
-    def wheel(self, sid, speed):
-        """Constant-speed mode. speed -32767..32767 steps/s (negative = CW)."""
+    def wheel_mode(self, sid, speed):
+        """Constant-speed (closed-loop) mode. speed -32767..32767 steps/s,
+        negative = reverse. Re-enables torque (clears a stall-protection
+        unload). Note: switching from servo mode while a goal move is
+        still executing can swallow the mode change — let moves finish
+        or allow ~1.5 s before entering wheel mode."""
+        self.write(sid, REG_TORQUE_ENABLE, (1,))
         self.set_mode(sid, wheel=True)
+        time.sleep(0.05)
         v = abs(int(speed)) | (0x8000 if speed < 0 else 0)
         self.write(sid, REG_GOAL_SPEED, le16(v))
 
@@ -212,6 +221,11 @@ class BusServo:
 
     def stop(self, sid):
         self.write(sid, REG_GOAL_SPEED, le16(0))
+
+    def get_mode(self, sid):
+        """0 = servo/position, 1 = wheel/constant-speed."""
+        p = self.read(sid, REG_MODE, 1)
+        return p[0] if p else None
 
     # ---- feedback --------------------------------------------------------
 
@@ -261,6 +275,7 @@ class BusServo:
             "temp_C": self.get_temp(sid),
             "mA": self.get_current(sid),
             "moving": self.is_moving(sid),
+            "mode": self.get_mode(sid),
         }
 
 
@@ -327,7 +342,7 @@ def main():
             if args.speed == 0:
                 bus.stop(args.id)
             else:
-                bus.wheel(args.id, args.speed)
+                bus.wheel_mode(args.id, args.speed)
             print(f"wheel speed={args.speed}")
 
         elif args.cmd == "servo-mode":
